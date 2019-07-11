@@ -203,7 +203,7 @@ def lbs(betas, pose, v_template, shapedirs, posedirs, J_regressor, parents,
 
     v_posed = pose_offsets + v_shaped
     # 4. Get the global joint location
-    J_transformed, A = batch_rigid_transform(rot_mats, J, parents, dtype=dtype)
+    J_transformed, A = batch_rigid_transform(rot_mats, J.expand_as(rot_mats[:,:,:,0]), parents, dtype=dtype)
 
     # 5. Do skinning:
     # W is N x V x (J + 1)
