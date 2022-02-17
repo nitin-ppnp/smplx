@@ -10,8 +10,7 @@
 #
 # Copyright©2019 Max-Planck-Gesellschaft zur Förderung
 # der Wissenschaften e.V. (MPG). acting on behalf of its Max Planck Institute
-# for Intelligent Systems and the Max Planck Institute for Biological
-# Cybernetics. All rights reserved.
+# for Intelligent Systems. All rights reserved.
 #
 # Contact: ps-license@tuebingen.mpg.de
 
@@ -203,7 +202,7 @@ def lbs(betas, pose, v_template, shapedirs, posedirs, J_regressor, parents,
 
     v_posed = pose_offsets + v_shaped
     # 4. Get the global joint location
-    J_transformed, A = batch_rigid_transform(rot_mats, J.expand_as(rot_mats[:,:,:,0]), parents, dtype=dtype)
+    J_transformed, A = batch_rigid_transform(rot_mats, J, parents, dtype=dtype)
 
     # 5. Do skinning:
     # W is N x V x (J + 1)
@@ -345,7 +344,7 @@ def batch_rigid_transform(rot_mats, joints, parents, dtype=torch.float32):
 
     transforms_mat = transform_mat(
         rot_mats.view(-1, 3, 3),
-        rel_joints.view(-1, 3, 1)).view(-1, joints.shape[1], 4, 4)
+        rel_joints.reshape(-1, 3, 1)).view(-1, joints.shape[1], 4, 4)
 
     transform_chain = [transforms_mat[:, 0]]
     for i in range(1, parents.shape[0]):

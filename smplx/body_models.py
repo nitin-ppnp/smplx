@@ -10,8 +10,7 @@
 #
 # Copyright©2019 Max-Planck-Gesellschaft zur Förderung
 # der Wissenschaften e.V. (MPG). acting on behalf of its Max Planck Institute
-# for Intelligent Systems and the Max Planck Institute for Biological
-# Cybernetics. All rights reserved.
+# for Intelligent Systems. All rights reserved.
 #
 # Contact: ps-license@tuebingen.mpg.de
 
@@ -35,7 +34,7 @@ import torch
 import torch.nn as nn
 
 from .lbs import (
-    lbs, vertices2landmarks, find_dynamic_lmk_idx_and_bcoords)
+    lbs, vertices2landmarks, find_dynamic_lmk_idx_and_bcoords, batch_rodrigues)
 
 from .vertex_ids import vertex_ids as VERTEX_IDS
 from .utils import Struct, to_np, to_tensor
@@ -317,7 +316,7 @@ class SMPL(nn.Module):
         return 'Number of betas: {}'.format(self.NUM_BETAS)
 
     def forward(self, betas=None, body_pose=None, global_orient=None,
-                transl=None, return_verts=True, return_full_pose=False,
+                transl=None, return_verts=True, return_full_pose=False, pose2rot=True,
                 **kwargs):
         ''' Forward pass for the SMPL model
 
@@ -364,14 +363,17 @@ class SMPL(nn.Module):
 
         full_pose = torch.cat([global_orient, body_pose], dim=1)
 
-        if betas.shape[0] != self.batch_size:
-            num_repeats = int(self.batch_size / betas.shape[0])
+        batch_size = max(betas.shape[0], global_orient.shape[0],
+                         body_pose.shape[0])
+
+        if betas.shape[0] != batch_size:
+            num_repeats = int(batch_size / betas.shape[0])
             betas = betas.expand(num_repeats, -1)
 
         vertices, joints = lbs(betas, full_pose, self.v_template,
                                self.shapedirs, self.posedirs,
                                self.J_regressor, self.parents,
-                               self.lbs_weights, dtype=self.dtype)
+                               self.lbs_weights, pose2rot=pose2rot, dtype=self.dtype)
 
         joints = self.vertex_joint_selector(vertices, joints)
         # Map the joints to the current dataset
@@ -386,7 +388,7 @@ class SMPL(nn.Module):
                              global_orient=global_orient,
                              body_pose=body_pose,
                              joints=joints,
-                             betas=self.betas,
+                             betas=betas,
                              full_pose=full_pose if return_full_pose else None)
 
         return output
@@ -569,7 +571,7 @@ class SMPLH(SMPL):
 
     def forward(self, betas=None, global_orient=None, body_pose=None,
                 left_hand_pose=None, right_hand_pose=None, transl=None,
-                return_verts=True, return_full_pose=False,
+                return_verts=True, return_full_pose=False, pose2rot=True,
                 **kwargs):
         '''
         '''
@@ -589,10 +591,11 @@ class SMPLH(SMPL):
             if hasattr(self, 'transl'):
                 transl = self.transl
 
-        left_hand_pose = torch.einsum(
-            'bi,ij->bj', [left_hand_pose, self.left_hand_components])
-        right_hand_pose = torch.einsum(
-            'bi,ij->bj', [right_hand_pose, self.right_hand_components])
+        if self.use_pca:
+            left_hand_pose = torch.einsum(
+                'bi,ij->bj', [left_hand_pose, self.left_hand_components])
+            right_hand_pose = torch.einsum(
+                'bi,ij->bj', [right_hand_pose, self.right_hand_components])
 
         full_pose = torch.cat([global_orient, body_pose,
                                left_hand_pose,
@@ -602,7 +605,7 @@ class SMPLH(SMPL):
         vertices, joints = lbs(self.betas, full_pose, self.v_template,
                                self.shapedirs, self.posedirs,
                                self.J_regressor, self.parents,
-                               self.lbs_weights,
+                               self.lbs_weights, pose2rot=pose2rot,
                                dtype=self.dtype)
 
         # Add any extra joints that might be needed
@@ -616,7 +619,7 @@ class SMPLH(SMPL):
 
         output = ModelOutput(vertices=vertices if return_verts else None,
                              joints=joints,
-                             betas=self.betas,
+                             betas=betas,
                              global_orient=global_orient,
                              body_pose=body_pose,
                              left_hand_pose=left_hand_pose,
@@ -817,7 +820,7 @@ class SMPLX(SMPLH):
     def forward(self, betas=None, global_orient=None, body_pose=None,
                 left_hand_pose=None, right_hand_pose=None, transl=None,
                 expression=None, jaw_pose=None, leye_pose=None, reye_pose=None,
-                return_verts=True, return_full_pose=False, **kwargs):
+                return_verts=True, return_full_pose=False, pose2rot=True, **kwargs):
         '''
         Forward pass for the SMPLX model
 
@@ -872,18 +875,38 @@ class SMPLX(SMPLH):
 
         # If no shape and pose parameters are passed along, then use the
         # ones from the module
-        global_orient = (global_orient if global_orient is not None else
-                         self.global_orient)
-        body_pose = body_pose if body_pose is not None else self.body_pose
+        if global_orient is None and pose2rot:
+            global_orient = self.global_orient
+        elif global_orient is None and not pose2rot:
+            global_orient = batch_rodrigues(self.global_orient.view(-1,3)).view(self.batch_size,-1,3,3)
+
+        if body_pose is None and pose2rot:
+            body_pose = self.body_pose
+        elif body_pose is None and not pose2rot:
+            body_pose = batch_rodrigues(self.body_pose.view(-1,3)).view(self.batch_size,-1,3,3)
+
+        if jaw_pose is None and pose2rot:
+            jaw_pose = self.jaw_pose
+        elif jaw_pose is None and not pose2rot:
+            jaw_pose = batch_rodrigues(self.jaw_pose.view(-1,3)).view(self.batch_size,-1,3,3)
+
+        if leye_pose is None and pose2rot:
+            leye_pose = self.leye_pose
+        elif leye_pose is None and not pose2rot:
+            leye_pose = batch_rodrigues(self.leye_pose.view(-1,3)).view(self.batch_size,-1,3,3)
+
+        if reye_pose is None and pose2rot:
+            reye_pose = self.reye_pose
+        elif reye_pose is None and not pose2rot:
+            reye_pose = batch_rodrigues(self.reye_pose.view(-1,3)).view(self.batch_size,-1,3,3)
+
         betas = betas if betas is not None else self.betas
 
         left_hand_pose = (left_hand_pose if left_hand_pose is not None else
                           self.left_hand_pose)
         right_hand_pose = (right_hand_pose if right_hand_pose is not None else
                            self.right_hand_pose)
-        jaw_pose = jaw_pose if jaw_pose is not None else self.jaw_pose
-        leye_pose = leye_pose if leye_pose is not None else self.leye_pose
-        reye_pose = reye_pose if reye_pose is not None else self.reye_pose
+
         expression = expression if expression is not None else self.expression
 
         apply_trans = transl is not None or hasattr(self, 'transl')
@@ -891,10 +914,15 @@ class SMPLX(SMPLH):
             if hasattr(self, 'transl'):
                 transl = self.transl
 
-        left_hand_pose = torch.einsum(
-            'bi,ij->bj', [left_hand_pose, self.left_hand_components])
-        right_hand_pose = torch.einsum(
-            'bi,ij->bj', [right_hand_pose, self.right_hand_components])
+        if self.use_pca:
+            left_hand_pose = torch.einsum(
+                'bi,ij->bj', [left_hand_pose, self.left_hand_components])
+            right_hand_pose = torch.einsum(
+                'bi,ij->bj', [right_hand_pose, self.right_hand_components])
+        
+        if not pose2rot:
+            left_hand_pose = batch_rodrigues(left_hand_pose.view(-1,3)).view(self.batch_size,-1,3,3)
+            right_hand_pose = batch_rodrigues(right_hand_pose.view(-1,3)).view(self.batch_size,-1,3,3)
 
         full_pose = torch.cat([global_orient, body_pose,
                                jaw_pose, leye_pose, reye_pose,
@@ -903,22 +931,25 @@ class SMPLX(SMPLH):
 
         # Add the mean pose of the model. Does not affect the body, only the
         # hands when flat_hand_mean == False
-        full_pose += self.pose_mean
+        if pose2rot:        # temporary solution. Assuming that the mean is zero if rotation matrices are provided or pose2rot is False
+            full_pose += self.pose_mean
 
         batch_size = max(betas.shape[0], global_orient.shape[0],
                          body_pose.shape[0])
         # Concatenate the shape and expression coefficients
-        shape_components = torch.cat(
-            [betas.expand(int(batch_size / betas.shape[0]), -1), expression],
-            dim=-1)
+        scale = int(batch_size / betas.shape[0])
+        if scale > 1:
+            betas = betas.expand(scale, -1)
+        shape_components = torch.cat([betas, expression], dim=-1)
 
         vertices, joints = lbs(shape_components, full_pose, self.v_template,
                                self.shapedirs, self.posedirs,
                                self.J_regressor, self.parents,
-                               self.lbs_weights,
+                               self.lbs_weights, pose2rot=pose2rot,
                                dtype=self.dtype)
 
-        lmk_faces_idx = self.lmk_faces_idx.unsqueeze(dim=0)
+        lmk_faces_idx = self.lmk_faces_idx.unsqueeze(
+            dim=0).expand(batch_size, -1).contiguous()
         lmk_bary_coords = self.lmk_bary_coords.unsqueeze(dim=0).repeat(
             self.batch_size, 1, 1)
         if self.use_face_contour:
@@ -927,7 +958,7 @@ class SMPLX(SMPLH):
                 self.dynamic_lmk_bary_coords,
                 self.neck_kin_chain, dtype=self.dtype)
 
-            lmk_faces_idx = torch.cat([lmk_faces_idx.expand(batch_size, -1),
+            lmk_faces_idx = torch.cat([lmk_faces_idx,
                                        dyn_lmk_faces_idx], 1)
             lmk_bary_coords = torch.cat(
                 [lmk_bary_coords.expand(batch_size, -1, -1),
